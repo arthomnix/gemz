@@ -1,5 +1,4 @@
 use std::error::Error;
-use std::fs::read;
 use std::io::{Read, Seek};
 use std::sync::Arc;
 use anyhow::bail;

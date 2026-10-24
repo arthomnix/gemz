@@ -6,7 +6,7 @@ use candle_core::{Device, Tensor};
 use candle_core::quantized::gguf_file::Content;
 use tokenizers::Tokenizer;
 
-pub fn compress(input: &str, tokenizer: impl AsRef<[u8]>, model: &mut (impl Seek + Read)) -> anyhow::Result<Vec<u8>> {
+pub fn compress(input: &str, tokenizer: impl AsRef<[u8]>, model: &mut (impl Seek + Read), lossy_threshold: f32, lossy_evaluation_layer: usize) -> anyhow::Result<Vec<u8>> {
     // Tokenize input text
     let tokenizer = Tokenizer::from_bytes(tokenizer)
         .map_err(Into::<Arc<dyn Error + Send + Sync>>::into)?;
@@ -38,7 +38,7 @@ pub fn compress(input: &str, tokenizer: impl AsRef<[u8]>, model: &mut (impl Seek
     output.push(false);
     output.extend(&tokens[0].to_le_bytes().view_bits::<Lsb0>()[..token_bits]);
     print!("{}", tokenizer.id_to_token(tokens[0]).unwrap());
-    std::io::stdout().flush();
+    std::io::stdout().flush()?;
 
     for index in 0..input_tokens.len() - 1 {
         let context = &tokens[index..=index];
@@ -57,41 +57,40 @@ pub fn compress(input: &str, tokenizer: impl AsRef<[u8]>, model: &mut (impl Seek
             output.extend(&index.view_bits::<Lsb0>()[..3]);
             print!("<{index}>");
         } else {
-            let kv_cache_checkpoint = kv_cache.clone();
-
-            let mut top_8_embeddings = vec![];
-            for (tok, _) in top_8 {
-                let input_tensor = Tensor::new(&[*tok], &device)?.unsqueeze(0)?;
-                let x = model.forward_inner(&input_tensor, &mut kv_cache, index + 2)?
-                    .into_iter()
-                    .map(|x| x.squeeze(0).unwrap().squeeze(0).unwrap())
-                    .collect::<Vec<_>>();
-                top_8_embeddings.push(x);
-                kv_cache = kv_cache_checkpoint.clone();
-            }
-
-            let real_tok = tokens[index + 1];
-            let input_tensor = Tensor::new(&[real_tok], &device)?.unsqueeze(0)?;
-            let real_embedding = model.forward_inner(&input_tensor, &mut kv_cache, index + 2)?
-                .into_iter()
-                .map(|x| x.squeeze(0).unwrap().squeeze(0).unwrap())
-                .collect::<Vec<_>>();
-            kv_cache = kv_cache_checkpoint.clone();
-
             let mut min_distance = f32::INFINITY;
             let mut min_index = 0;
-            for (i, x) in top_8_embeddings.iter_mut().enumerate() {
-                let dist = x.iter().zip(real_embedding.iter()).map(|(t1, t2)| {
-                    (t1 - t2).unwrap().sqr().unwrap().sum_all().unwrap().to_scalar::<f32>().unwrap()
-                }).sum::<f32>();
 
-                if dist < min_distance {
-                    min_distance = dist;
-                    min_index = i;
+            if lossy_threshold > 0.0 {
+                let kv_cache_checkpoint = kv_cache.clone();
+
+                let real_tok = tokens[index + 1];
+                let input_tensor = Tensor::new(&[real_tok], &device)?.unsqueeze(0)?;
+                let real = model.forward_inner(&input_tensor, &mut kv_cache, lossy_evaluation_layer, index + 2)?
+                    .squeeze(0)?.squeeze(0)?;
+                let real_norm = real.norm()?;
+                let real = real.broadcast_div(&real_norm)?;
+                kv_cache = kv_cache_checkpoint.clone();
+
+                let mut top_8_embeddings = vec![];
+                for (tok, _) in top_8 {
+                    let input_tensor = Tensor::new(&[*tok], &device)?.unsqueeze(0)?;
+                    let x = model.forward_inner(&input_tensor, &mut kv_cache, lossy_evaluation_layer, index + 2)?
+                        .squeeze(0)?.squeeze(0)?;
+                    let x = x.broadcast_div(&real_norm)?;
+                    top_8_embeddings.push(x);
+                    kv_cache = kv_cache_checkpoint.clone();
+                }
+
+                for (i, x) in top_8_embeddings.iter_mut().enumerate() {
+                    let dist = (&*x - &real)?.norm()?.to_scalar::<f32>()?;
+                    if dist < min_distance {
+                        min_distance = dist;
+                        min_index = i;
+                    }
                 }
             }
 
-            if min_distance < 100000000.0 {
+            if min_distance < lossy_threshold {
                 let tok = top_8[min_index].0;
                 tokens[index + 1] = tok;
 
@@ -104,7 +103,7 @@ pub fn compress(input: &str, tokenizer: impl AsRef<[u8]>, model: &mut (impl Seek
                 print!("{}", tokenizer.id_to_token(tokens[index + 1]).unwrap());
             }
         }
-        std::io::stdout().flush();
+        std::io::stdout().flush()?;
     }
 
     println!();

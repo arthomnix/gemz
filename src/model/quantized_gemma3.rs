@@ -401,7 +401,7 @@ impl ModelWeights {
         })
     }
 
-    pub fn forward_inner(&self, x: &Tensor, kv_cache: &mut Option<Vec<Option<(Tensor, Tensor)>>>, index_pos: usize) -> Result<Vec<Tensor>> {
+    pub fn forward_inner(&self, x: &Tensor, kv_cache: &mut Option<Vec<Option<(Tensor, Tensor)>>>, up_to_layer: usize, index_pos: usize) -> Result<Tensor> {
         let (b_sz, seq_len) = x.dims2()?;
 
         let mut layer_in = self.tok_embeddings.forward(x)?;
@@ -411,8 +411,7 @@ impl ModelWeights {
             *kv_cache = Some(vec![None; self.layers.len()]);
         }
 
-        let mut v = Vec::with_capacity(self.layers.len());
-        for (layer, kv_cache) in self.layers.iter().zip(kv_cache.as_mut().unwrap().iter_mut()) {
+        for (layer, kv_cache) in self.layers[..up_to_layer].iter().zip(kv_cache.as_mut().unwrap().iter_mut()) {
             let attention_mask = if seq_len == 1 {
                 None
             } else {
@@ -433,11 +432,10 @@ impl ModelWeights {
             let x = layer.post_ffn_norm.forward(&x)?;
             let x = (x + residual)?;
 
-            v.push(x.clone());
             layer_in = x;
         }
 
-        Ok(v)
+        Ok(layer_in)
     }
 
     pub fn output(&self, seq_len: usize, layer_in: &Tensor) -> Result<Tensor> {
@@ -450,8 +448,7 @@ impl ModelWeights {
     pub fn forward(&self, x: &Tensor, kv_cache: &mut Option<Vec<Option<(Tensor, Tensor)>>>, index_pos: usize) -> Result<Tensor> {
         let (_, seq_len) = x.dims2()?;
 
-        let layers = self.forward_inner(x, kv_cache, index_pos)?;
-        let layer_in = layers.last().unwrap();
-        self.output(seq_len, layer_in)
+        let layer_in = self.forward_inner(x, kv_cache, self.layers.len(), index_pos)?;
+        self.output(seq_len, &layer_in)
     }
 }
