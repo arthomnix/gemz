@@ -10,19 +10,11 @@ struct Args {
 
     #[arg(short, long = "output")]
     output_path: Option<PathBuf>,
-
-    #[arg(short, long = "tokenizer")]
-    tokenizer_path: PathBuf,
-
-    #[arg(short, long = "model")]
-    model_path: PathBuf,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let tokenizer = fs::read(&args.tokenizer_path)?;
-    let mut model = fs::File::open(&args.model_path)?;
 
     let text = fs::read(&args.input_path)?;
 
@@ -39,7 +31,7 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    let out = decompress::decompress(&text, &tokenizer, &mut model)?;
+    let out = decompress::decompress(&text)?;
     fs::write(output_path, out.as_bytes())?;
     
     Ok(())

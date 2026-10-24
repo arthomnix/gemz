@@ -1,15 +1,13 @@
 use std::error::Error;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 use std::sync::Arc;
 use bitvec::prelude::*;
 use candle_core::{Device, Tensor};
-use candle_core::quantized::gguf_file::Content;
-use tokenizers::Tokenizer;
+use crate::load_model::{load_model, load_tokenizer};
 
-pub fn compress(input: &str, tokenizer: impl AsRef<[u8]>, model: &mut (impl Seek + Read), lossy_threshold: f32, lossy_evaluation_layer: usize) -> anyhow::Result<Vec<u8>> {
+pub fn compress(input: &str, model_id: u32, lossy_threshold: f32, lossy_evaluation_layer: usize) -> anyhow::Result<Vec<u8>> {
     // Tokenize input text
-    let tokenizer = Tokenizer::from_bytes(tokenizer)
-        .map_err(Into::<Arc<dyn Error + Send + Sync>>::into)?;
+    let tokenizer = load_tokenizer(model_id)?;
     let input_tokens = tokenizer.encode_fast(input, false)
         .map_err(Into::<Arc<dyn Error + Send + Sync>>::into)?;
     let mut tokens = input_tokens.get_ids().to_vec();
@@ -18,8 +16,7 @@ pub fn compress(input: &str, tokenizer: impl AsRef<[u8]>, model: &mut (impl Seek
 
     // Load model
     let device = Device::Cpu;
-    let ct = Content::read(model)?;
-    let model = crate::model::quantized_gemma3::ModelWeights::from_gguf(ct, model, &device)?;
+    let model = load_model(model_id, &device)?;
     let mut kv_cache = None;
 
     // Load BOS token

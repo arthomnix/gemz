@@ -1,29 +1,12 @@
 use std::error::Error;
-use std::io::{Read, Seek};
 use std::sync::Arc;
 use anyhow::bail;
 use bitvec::macros::internal::funty::Integral;
 use bitvec::prelude::*;
 use candle_core::{Device, Tensor};
-use candle_core::quantized::gguf_file::Content;
-use tokenizers::Tokenizer;
+use crate::load_model::{load_model, load_tokenizer};
 
-pub fn decompress(input: impl AsRef<[u8]>, tokenizer: impl AsRef<[u8]>, model: &mut (impl Seek + Read)) -> anyhow::Result<String> {
-    let tokenizer = Tokenizer::from_bytes(tokenizer)
-        .map_err(Into::<Arc<dyn Error + Send + Sync>>::into)?;
-    let token_bits = (tokenizer.get_vocab_size(false) as f32).log2().ceil() as usize;
-
-    // Load model
-    let device = Device::Cpu;
-    let ct = Content::read(model)?;
-    let model = crate::model::quantized_gemma3::ModelWeights::from_gguf(ct, model, &device)?;
-    let mut kv_cache = None;
-
-    // Load BOS token
-    let bos = tokenizer.token_to_id("<bos>").expect("Tokenizer does not have BOS token!");
-    let input_tensor = Tensor::new(&[bos], &device)?.unsqueeze(0)?;
-    model.forward(&input_tensor, &mut kv_cache, 0)?;
-
+pub fn decompress(input: impl AsRef<[u8]>) -> anyhow::Result<String> {
     // Load input to bit slice
     let input_bv = BitSlice::<u8, Lsb0>::from_slice(input.as_ref());
     let mut reader_pos = 0;
@@ -38,9 +21,19 @@ pub fn decompress(input: impl AsRef<[u8]>, tokenizer: impl AsRef<[u8]>, model: &
         bail!("Invalid file version {version} - this implementation only understands version 0");
     }
     let model_id = read_bits::<u32>(input_bv, &mut reader_pos, 32);
-    if model_id != 0 {
-        bail!("Invalid model ID {model_id} - this implementation only supports ggml-org/gemma-3-270m-gguf:q4_k_m (ID 0)");
-    }
+
+    let tokenizer = load_tokenizer(model_id)?;
+    let token_bits = (tokenizer.get_vocab_size(false) as f32).log2().ceil() as usize;
+
+    // Load model
+    let device = Device::Cpu;
+    let model = load_model(model_id, &device)?;
+    let mut kv_cache = None;
+
+    // Load BOS token
+    let bos = tokenizer.token_to_id("<bos>").expect("Tokenizer does not have BOS token!");
+    let input_tensor = Tensor::new(&[bos], &device)?.unsqueeze(0)?;
+    model.forward(&input_tensor, &mut kv_cache, 0)?;
 
     // Get first token and load into model
     let mut tokens = vec![];
